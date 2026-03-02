@@ -49,8 +49,9 @@ if __name__ == "__main__":
     rl = ReliabilityLayer(runs=3, mode="stabilize")
 
     queries = [
-        "What is the reason for the current global economic situation?",
-        "What are the health risks of smoking?",
+        "How to make a cake?",
+        "Why is the sky blue?",
+        "What is the current state of AI development?"
     ]
 
     wrapped = rl.wrap(groq_agent)
