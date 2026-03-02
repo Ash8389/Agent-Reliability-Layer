@@ -22,12 +22,50 @@ class StructuredOutputEnforcer:
         return f'{prompt}\n\n{self.SCHEMA}'
 
     def parse_output(self, raw: str) -> dict:
-        # Remove markdown fences
-        raw = re.sub(r'```json|```', '', raw).strip()
-        match = re.search(r'\{.*\}', raw, re.DOTALL)
-        if not match:
-            raise ValueError('No JSON found')
-        return json.loads(match.group())
+        # Step 1: Remove markdown fences
+        cleaned = re.sub(r'```json|```', '', raw).strip()
+
+        # Step 2: Try standard JSON parse first
+        match = re.search(r'\{.*\}', cleaned, re.DOTALL)
+        if match:
+            try:
+                return json.loads(match.group())
+            except json.JSONDecodeError:
+                pass
+
+        # Step 3: Regex fallback for malformed JSON
+        # Handles case where LLM omits quotes around values
+        answer_match = re.search(
+            r'"main_answer"\s*:\s*"?([^"\n}{]+?)(?:"\s*,|\s*,\s*"[a-z])',
+            cleaned,
+            re.DOTALL
+        )
+        if not answer_match:
+            # Broader fallback: grab everything after main_answer
+            # until next JSON key
+            answer_match = re.search(
+                r'"main_answer"\s*:\s*"?([^"}{]{10,})',
+                cleaned
+            )
+        findings_matches = re.findall(
+            r'"([^"]{10,})"',
+            cleaned
+        )
+
+        if answer_match:
+            return {
+                'main_answer': answer_match.group(1).strip(),
+                'key_findings': findings_matches[1:4]
+                                if len(findings_matches) > 1
+                                else [],
+                'confidence': 'MEDIUM',
+                'sources_used': []
+            }
+
+        # Step 4: Total fallback — raise so process() catches it
+        raise ValueError(
+            f'Cannot parse output: {raw[:100]}'
+        )
 
 class QueryEnsembler:
     """Ensembles multiple query results to produce a generic stabilized form."""
@@ -92,29 +130,44 @@ class StabilizationEngine:
         pass
 
     def process(self, raw_runs: list) -> dict:
-        """
-        Takes a list of RunResult objects from ExecutionEngine.
-        Returns a dict with keys: stabilized_output, method_used, agreement_rate
-        """
-        # Extract raw outputs from RunResult objects
-        outputs = [r.raw_output for r in raw_runs if r.error is None]
-        
-        # Fallback if all runs failed
+        outputs = [r.raw_output for r in raw_runs
+                   if r.error is None]
+
         if not outputs:
             return {
                 'stabilized_output': '',
                 'method_used': 'fallback_empty',
-                'agreement_rate': 0.0
+                'agreement_rate': 0.0,
+                'parsed_runs': []
             }
-        
-        # Find the most common output (consensus)
+
+        enforcer = StructuredOutputEnforcer()
+
+        clean_outputs = []
+        parsed_runs = []
+        for output in outputs:
+            try:
+                parsed = enforcer.parse_output(output)
+                clean_outputs.append(
+                    parsed.get('main_answer', output))
+                parsed_runs.append(parsed)
+            except Exception:
+                clean_outputs.append(output)
+                parsed_runs.append({
+                    'main_answer': output,
+                    'key_findings': [],
+                    'confidence': 'LOW',
+                    'sources_used': []
+                })
+
         from collections import Counter
-        counts = Counter(outputs)
+        counts = Counter(clean_outputs)
         best_answer, best_count = counts.most_common(1)[0]
-        agreement_rate = best_count / len(outputs)
-        
+        agreement_rate = best_count / len(clean_outputs)
+
         return {
             'stabilized_output': best_answer,
-            'method_used': 'consensus_majority',
-            'agreement_rate': round(agreement_rate, 3)
+            'method_used': 'structured_consensus',
+            'agreement_rate': round(agreement_rate, 3),
+            'parsed_runs': parsed_runs
         }

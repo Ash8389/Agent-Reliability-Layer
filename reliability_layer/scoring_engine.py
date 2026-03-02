@@ -23,10 +23,17 @@ class ScoringEngine:
         return total / (2 * n * (n-1))
 
     def answer_variance(self, answers: list[str]) -> float:
-        n = len(answers)
-        disagreements = sum(1 for i in range(n) for j in range(n)
-                            if i!=j and answers[i]!=answers[j])
-        return disagreements / (n*(n-1)) if n>1 else 0.0
+        if len(answers) < 2:
+            return 0.0
+        valid = [a for a in answers if a.strip()]
+        if len(valid) < 2:
+            return 0.0
+        embeddings = self.embedder.encode(valid)
+        normed = []
+        for emb in embeddings:
+            norm = np.linalg.norm(emb)
+            normed.append(emb / norm if norm > 0 else emb)
+        return self._tv(normed)
 
     def findings_variance(self, all_findings: list[list[str]]) -> float:
         flat = [f for run in all_findings for f in run]
@@ -41,16 +48,42 @@ class ScoringEngine:
                   for v in run_vecs]
         return self._tv(normed)
 
-    def citations_variance(self, all_cites: list[list[str]]) -> float:
-        def normalize(u): 
-            return u.lower().rstrip('/').replace('https://','').replace('http://','').replace('www.','')
-        
-        sets = [set(normalize(u) for u in run) for run in all_cites]
-        n = len(sets)
-        if n < 2 or all(not s for s in sets): return 0.0
-        total = sum((1 - len(sets[i]&sets[j])/(len(sets[i]|sets[j]) or 1))
-                    for i in range(n) for j in range(n) if i!=j)
-        return total / (n*(n-1))
+    def citations_variance(self,
+                           all_cites: list[list[str]]
+                           ) -> float:
+        # Flatten all citations across all runs
+        flat = [c for run in all_cites for c in run]
+
+        # If no citations in any run, return 0
+        if not flat:
+            return 0.0
+
+        # If all runs have empty citations, return 0
+        if all(len(run) == 0 for run in all_cites):
+            return 0.0
+
+        # Use semantic embeddings — same approach as findings
+        embeddings = self.embedder.encode(flat)
+
+        # Build mean embedding per run
+        idx = 0
+        run_vecs = []
+        for run in all_cites:
+            if len(run) == 0:
+                run_vecs.append(np.zeros(
+                    embeddings.shape[1]))
+            else:
+                chunk = embeddings[idx:idx + len(run)]
+                run_vecs.append(chunk.mean(axis=0))
+            idx += len(run)
+
+        # L2 normalize
+        normed = []
+        for v in run_vecs:
+            norm = np.linalg.norm(v)
+            normed.append(v / norm if norm > 0 else v)
+
+        return self._tv(normed)
 
     def compute(self, runs: list[dict], *args: Any, **kwargs: Any) -> VarianceScores:
         """Computes Total Variance metric over output set."""

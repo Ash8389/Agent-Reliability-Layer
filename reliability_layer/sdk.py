@@ -8,6 +8,7 @@ class WrappedAgent:
     def __init__(self, agent_fn, config):
         self.agent_fn = agent_fn
         self.config = config
+        self.scorer = ScoringEngine()
 
     def query(self, question: str):
         return asyncio.run(self._run(question))
@@ -15,16 +16,34 @@ class WrappedAgent:
     async def _run(self, question: str):
         engine = ExecutionEngine(self.agent_fn, k=self.config['runs'], timeout_seconds=self.config.get('timeout', 30))
         stab = StabilizationEngine()
-        scorer = ScoringEngine()
+        scorer = self.scorer
         builder = ResponseBuilder()
 
-        runs = await engine.run_parallel(question)
-        stabilized = stab.process(runs)
-        
-        parsed_runs = [{'answer': r.raw_output, 'findings': [], 'citations': []} for r in runs]
-        scores = scorer.compute(parsed_runs)
-        
-        response = builder.build(stabilized, scores, runs)
+        raw_runs   = await engine.run_parallel(question)
+        stabilized = stab.process(raw_runs)
+
+        parsed_runs = stabilized.get('parsed_runs', [])
+        runs_for_scoring = []
+        for i, run in enumerate(raw_runs):
+            if i < len(parsed_runs):
+                runs_for_scoring.append({
+                    'answer':   parsed_runs[i].get(
+                                'main_answer', run.raw_output),
+                    'findings': parsed_runs[i].get(
+                                'key_findings', []),
+                    'citations':parsed_runs[i].get(
+                                'sources_used', [])
+                })
+            else:
+                runs_for_scoring.append({
+                    'answer':   run.raw_output,
+                    'findings': [],
+                    'citations':[]
+                })
+
+        scores   = self.scorer.compute(runs_for_scoring)
+        builder  = ResponseBuilder()
+        response = builder.build(stabilized, scores, raw_runs)
 
         if response.reliability < 0.7:
             warnings.warn(f'Low reliability: {response.reliability}',
