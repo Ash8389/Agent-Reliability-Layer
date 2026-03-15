@@ -106,3 +106,70 @@ def test_audit_trail_completeness():
         assert hasattr(record, 'duration_ms')
         assert len(record.answer) <= 300
         assert record.duration_ms >= 0
+
+# ■■ Scenario 7: Contradiction Detection ■■■■■■■■■■■■■■■■■■■■■■
+def test_contradiction_score_in_response():
+    """
+    Proves that the contradiction_score is present in the ReliabilityResponse
+    and is bounded between 0.0 and 1.0.
+    """
+    rl = ReliabilityLayer(runs=2)
+    result = rl.wrap(stable_agent).query('contradiction test')
+    
+    assert hasattr(result, 'contradiction_score')
+    assert result.contradiction_score >= 0.0
+    assert result.contradiction_score <= 1.0
+
+def test_no_critical_contradiction_for_stable_agent():
+    """
+    Proves that identical responses (from stable_agent) do not
+    trigger a critical contradiction.
+    """
+    rl = ReliabilityLayer(runs=3)
+    result = rl.wrap(stable_agent).query('contradiction test')
+    
+    assert hasattr(result, 'has_critical_contradiction')
+    assert result.has_critical_contradiction is False
+
+# ■■ Scenario 8: Phase 2 API Enhancements ■■■■■■■■■■■■■■■■■■■■■■
+def test_api_score_endpoint_returns_contradiction():
+    payload = {'runs': [
+        {'answer': 'Treatment X is safe.', 'findings': [], 'citations': []},
+        {'answer': 'Treatment X is safe.', 'findings': [], 'citations': []},
+        {'answer': 'Treatment X is safe.', 'findings': [], 'citations': []}
+    ], 'mode': 'standard', 'escalate_threshold': 0.75}
+    r = client.post('/score', json=payload)
+    assert r.status_code == 200, r.text
+    data = r.json()
+    assert 'contradiction_score' in data
+    assert data['contradiction_score'] >= 0.0
+    assert 'has_critical_contradiction' in data
+
+def test_api_health_returns_v2():
+    r = client.get('/health')
+    assert r.status_code == 200
+    data = r.json()
+    assert data['version'] == "2.0.0"
+
+def test_remediation_report_in_response():
+    rl = ReliabilityLayer(runs=3)
+    result = rl.wrap(stable_agent).query('remediation test')
+    assert hasattr(result, 'remediation_report')
+    assert result.remediation_report is not None
+
+def test_stable_agent_no_remediation_needed():
+    rl = ReliabilityLayer(runs=3)
+    result = rl.wrap(stable_agent).query('remediation test')
+    assert len(result.remediation_report.recommendations) == 0
+
+def test_unstable_agent_has_recommendations():
+    rl = ReliabilityLayer(runs=3)
+    result = rl.wrap(unstable_agent).query('remediation test')
+    assert len(result.remediation_report.recommendations) >= 1
+
+def test_full_pipeline_v2_complete():
+    rl = ReliabilityLayer(runs=3, mode="full")
+    result = rl.wrap(stable_agent).query('v2 complete test')
+    assert result.contradiction_score >= 0.0
+    assert result.remediation_report is not None
+    assert result.reliability >= 0.0

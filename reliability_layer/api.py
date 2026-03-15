@@ -16,7 +16,9 @@ import asyncio
 
 from reliability_layer.sdk import ReliabilityLayer
 from reliability_layer.scoring_engine import ScoringEngine
+from reliability_layer.remediation_engine import RemediationEngine
 from reliability_layer import __version__
+import dataclasses
 
 logger = logging.getLogger("reliability_layer.api")
 logging.basicConfig(level=logging.INFO)
@@ -50,6 +52,19 @@ class ScoreRun(BaseModel):
 
 class ScoreRequest(BaseModel):
     runs: List[ScoreRun]
+    mode: str = "standard"
+    escalate_threshold: float = 0.75
+
+
+class ScoreResponse(BaseModel):
+    answer_variance: float
+    findings_variance: float
+    citations_variance: float
+    overall_reliability: float
+    confidence_label: str
+    contradiction_score: float
+    has_critical_contradiction: bool
+    remediation_report: Optional[Dict[str, Any]] = None
 
 
 async def call_agent_endpoint(url: str, query: str):
@@ -106,28 +121,47 @@ async def analyze_endpoint(request: Request, payload: AnalyzeRequest):
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(e))
 
 
-@app.post("/score")
+@app.post("/score", response_model=ScoreResponse)
 @limiter.limit("10/minute")
 async def score_endpoint(request: Request, payload: ScoreRequest):
     start_time = time.time()
+    rl = ReliabilityLayer(mode=payload.mode, escalate_threshold=payload.escalate_threshold)
     scorer = ScoringEngine()
     
     # Convert payload runs to list of dicts
     runs_dicts = [run.model_dump() for run in payload.runs]
     scores = scorer.compute(runs_dicts)
     
-    # Wait, variance_scores object doesn't have a dict() out of the box if it's a generic object but it's a Pydantic model in reality or dataclass.
-    # It has overall_reliability and confidence_label. 
-    # The requirement: "Returns: VarianceScores as JSON"
-    
-    # The ScoringEngine.compute returns VarianceScores dataclass/pydantic. Let's return it directly. 
-    return scores
+    c_score = 0.0
+    has_crit = False
+    if getattr(scores, 'contradiction_result', None):
+        c_score = scores.contradiction_result.max_contradiction
+        has_crit = scores.contradiction_result.has_critical_contradiction
+
+    report = RemediationEngine().diagnose(
+        answer_variance=scores.answer_variance,
+        findings_variance=scores.findings_variance,
+        citations_variance=scores.citations_variance,
+        contradiction_score=c_score,
+        overall_reliability=scores.overall_reliability
+    )
+
+    return ScoreResponse(
+        answer_variance=scores.answer_variance,
+        findings_variance=scores.findings_variance,
+        citations_variance=scores.citations_variance,
+        overall_reliability=scores.overall_reliability,
+        confidence_label=scores.confidence_label,
+        contradiction_score=c_score,
+        has_critical_contradiction=has_crit,
+        remediation_report=dataclasses.asdict(report)
+    )
 
 
 @app.get("/health")
 async def health_endpoint():
     return {
         "status": "ok",
-        "version": __version__,
+        "version": "2.0.0",
         "timestamp": datetime.now(timezone.utc).isoformat()
     }

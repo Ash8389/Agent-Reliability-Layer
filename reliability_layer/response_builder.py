@@ -1,5 +1,8 @@
 from pydantic import BaseModel, field_validator
 from datetime import datetime, timezone
+from reliability_layer.remediation_engine import (
+    RemediationEngine, RemediationReport
+)
 
 class VarianceReport(BaseModel):
     answer_variance: float
@@ -41,6 +44,9 @@ class ReliabilityResponse(BaseModel):
     variance_report: VarianceReport
     metadata: dict
     audit_trail: list[RunRecord]
+    contradiction_score: float = 0.0
+    has_critical_contradiction: bool = False
+    remediation_report: RemediationReport | None = None
 
     @field_validator('answer')
     @classmethod
@@ -93,8 +99,25 @@ class ReliabilityResponse(BaseModel):
 class ResponseBuilder:
     def build(self, stabilized: dict, scores, raw_runs: list) -> ReliabilityResponse:
         final = stabilized['stabilized_output']
-        agreed = sum(1 for r in raw_runs if self._match(r.raw_output, final))
+        agreed = sum(
+            1 for r in raw_runs
+            if self._match(self._extract_answer(r.raw_output), final)
+        )
         
+        c_score = 0.0
+        critical = False
+        if hasattr(scores, 'contradiction_result') and scores.contradiction_result:
+            c_score = scores.contradiction_result.max_contradiction
+            critical = scores.contradiction_result.has_critical_contradiction
+
+        report = RemediationEngine().diagnose(
+            answer_variance=scores.answer_variance,
+            findings_variance=scores.findings_variance,
+            citations_variance=scores.citations_variance,
+            contradiction_score=c_score,
+            overall_reliability=scores.overall_reliability
+        )
+
         return ReliabilityResponse(
             answer=final,
             reliability=scores.overall_reliability,
@@ -118,8 +141,25 @@ class ResponseBuilder:
                     duration_ms=r.duration_ms,
                     had_error=r.error is not None
                 ) for r in raw_runs
-            ]
+            ],
+            contradiction_score=c_score,
+            has_critical_contradiction=critical,
+            remediation_report=report
         )
+
+    def _extract_answer(self, raw_output: str) -> str:
+        """Extract main_answer from JSON output if possible; fall back to raw."""
+        import json, re
+        cleaned = re.sub(r'```json|```', '', raw_output).strip()
+        match = re.search(r'\{.*\}', cleaned, re.DOTALL)
+        if match:
+            try:
+                parsed = json.loads(match.group())
+                answer = parsed.get('main_answer', '').strip()
+                return answer if answer else raw_output
+            except (json.JSONDecodeError, AttributeError):
+                pass
+        return raw_output
 
     def _match(self, output: str, final: str, threshold: float = 0.6) -> bool:
         fw = set(final.lower().split())

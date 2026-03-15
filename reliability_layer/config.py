@@ -20,9 +20,11 @@ class Settings(BaseSettings):
     groq_api_key: str = ""
     reliability_default_runs: int = 3
     reliability_default_timeout: int = 30
-    reliability_default_mode: str = "stabilize"
+    reliability_default_mode: str = "standard"
     reliability_log_level: str = "INFO"
     reliability_max_concurrent_runs: int = 10
+    escalate_threshold: float = 0.75
+    escalate_runs: int = 5
 
     class Config:
         env_file = ".env"

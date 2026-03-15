@@ -148,8 +148,9 @@ class StabilizationEngine:
         for output in outputs:
             try:
                 parsed = enforcer.parse_output(output)
-                clean_outputs.append(
-                    parsed.get('main_answer', output))
+                # Fall back to raw output if main_answer came back empty
+                ma = parsed.get('main_answer', '') or output
+                clean_outputs.append(ma)
                 parsed_runs.append(parsed)
             except Exception:
                 clean_outputs.append(output)
